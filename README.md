@@ -50,6 +50,25 @@ node tb.mjs sync     # fetch, merge, push the taskboard branch
 
 Merging happens task by task and never conflicts: log entries and steps are combined, the newer field values win, and if two clones created the same ID, one gets renumbered. A fresh clone picks up `origin/taskboard` automatically. Set `TB_AUTOSYNC=1` to sync after every change.
 
+## Web board on GitHub Pages
+
+The same board can live on GitHub Pages, so you can check it from anywhere, including your phone:
+
+```bash
+node tb.mjs pages        # writes docs/index.html
+git add docs && git commit -m "Add Pages board" && git push
+```
+
+Then turn on Pages: **repo Settings → Pages → Deploy from a branch → `main`, folder `/docs`**.
+
+- **Viewing** needs nothing for a public repo. The page loads the `taskboard` branch straight from GitHub, so it always shows the latest pushed state (no build step or Action).
+- **Editing** (and viewing a private repo) needs a GitHub token: click *Settings* on the page. Use a fine-grained token limited to that one repo with **Contents: Read and write**. Edits are normal commits on the `taskboard` branch, attributed to your GitHub account, with the same conflict check as the CLI.
+- The page only sees what is pushed. Agents on your machine should run `tb sync`, or set `TB_AUTOSYNC=1`.
+- One page can show any repo that uses tb: add `?repo=owner/name` to the URL, or change it in Settings.
+- Without a token, GitHub allows 60 API calls per hour, so the page checks for changes once a minute. With a token it checks every 5 seconds.
+
+A live example is this repo's own board: https://jannisjostbot.github.io/baton/
+
 ## Commands
 
 | Command | What it does |
@@ -65,7 +84,8 @@ Merging happens task by task and never conflicts: log entries and steps are comb
 | `done <ID> "summary"` | Finish |
 | `edit <ID> …` · `rm <ID>` | Edit / delete |
 | `sync` | Share via the remote |
-| `ui` | Web board (drag and drop, editing, notes, live updates) |
+| `ui` | Web board on your machine (drag and drop, editing, notes, live updates) |
+| `pages [--out docs/index.html]` | Generate the GitHub Pages version of the board |
 
 Task IDs can be written as `TB-4` or just `4`. Who is acting defaults to the current branch name; override with `--by NAME` or `TB_AGENT`. Other settings: `TB_BRANCH` (board branch), `TB_REMOTE` (default `origin`), `TB_PORT`.
 
@@ -73,7 +93,18 @@ The web board also shows how many **uncommitted files** sit in the worktree wher
 
 ## Developing baton itself
 
-This repo uses its own board: run `node tb.mjs context` or `node tb.mjs ui` here. The UI is the HTML at the bottom of `tb.mjs`, inside a comment, so the tool stays a single file.
+This repo uses its own board: run `node tb.mjs context` or `node tb.mjs ui` here.
+
+How the file is organised: `makeCore()` holds all task logic as pure JavaScript. The CLI uses it directly, and `tb pages` copies its source into the web page, so the CLI and the Pages board can never disagree about the rules. The UI page and the GitHub backend are embedded as comment blocks at the bottom of `tb.mjs`, so the tool stays a single file.
+
+## Tests
+
+```bash
+bash test/cli.test.sh        # CLI: flow, worktrees, parallel writes, sync/merge
+python3 test/pages.test.py   # Pages board in a real browser against a mock GitHub API (needs Playwright)
+```
+
+After changing the UI or the core logic, run `node tb.mjs pages` so `docs/index.html` stays in sync.
 
 ## License
 

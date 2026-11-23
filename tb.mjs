@@ -20,23 +20,288 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const BRANCH = process.env.TB_BRANCH || 'taskboard';
 const REF = `refs/heads/${BRANCH}`;
 const REMOTE = process.env.TB_REMOTE || 'origin';
 const TRACK = `refs/remotes/${REMOTE}/${BRANCH}`;
-const STATUSES = ['todo', 'in_progress', 'review', 'blocked', 'done'];
-const STATUS_LABEL = { todo: 'To do', in_progress: 'In progress', review: 'Review', blocked: 'Blocked', done: 'Done' };
-const STATUS_ALIAS = {
-  'in-progress': 'in_progress', inprogress: 'in_progress', progress: 'in_progress', wip: 'in_progress',
-  doing: 'in_progress', started: 'in_progress', open: 'todo', backlog: 'todo', new: 'todo',
-  closed: 'done', finished: 'done', complete: 'done', completed: 'done', blocker: 'blocked',
-};
-const PRIORITIES = ['high', 'normal', 'low'];
 const SCRIPT = fileURLToPath(import.meta.url);
+// ───────────────────────────── core ─────────────────────────────
+// Pure task logic: no Node APIs and no outer variables. The CLI uses it directly,
+// and `tb pages` ships its source (makeCore.toString()) to the browser, so the
+// GitHub Pages board edits tasks with exactly the same rules as the CLI.
 
-class UserError extends Error {}
-const fail = (msg) => { throw new UserError(msg); };
+function makeCore(rand) {
+  const STATUSES = ['todo', 'in_progress', 'review', 'blocked', 'done'];
+  const STATUS_LABEL = { todo: 'To do', in_progress: 'In progress', review: 'Review', blocked: 'Blocked', done: 'Done' };
+  const STATUS_ALIAS = {
+    'in-progress': 'in_progress', inprogress: 'in_progress', progress: 'in_progress', wip: 'in_progress',
+    doing: 'in_progress', started: 'in_progress', open: 'todo', backlog: 'todo', new: 'todo',
+    closed: 'done', finished: 'done', complete: 'done', completed: 'done', blocker: 'blocked',
+  };
+  const PRIORITIES = ['high', 'normal', 'low'];
+  const priRank = { high: 0, normal: 1, low: 2 };
+
+  class UserError extends Error {}
+  const fail = (msg) => { throw new UserError(msg); };
+  const now = () => new Date().toISOString();
+  const ser = (obj) => JSON.stringify(obj, null, 2) + '\n';
+
+  function normId(st, id) {
+    if (id === undefined || id === null || id === '') fail('missing task ID');
+    const s = String(id).trim().toUpperCase().replace(/^#/, '');
+    return /^\d+$/.test(s) ? `${st.config.prefix}-${s}` : s;
+  }
+  function getTask(st, id) {
+    const t = st.tasks.get(normId(st, id));
+    if (!t) fail(`no task ${id}`);
+    return t.data;
+  }
+  function nextNum(st) {
+    let max = 0;
+    const re = new RegExp(`^${st.config.prefix}-(\\d+)$`);
+    for (const id of st.tasks.keys()) { const m = re.exec(id); if (m) max = Math.max(max, Number(m[1])); }
+    return max + 1;
+  }
+  function newKey(list) {
+    const used = new Set((list || []).map((x) => x.k));
+    let k; do k = rand(2); while (used.has(k));
+    return k;
+  }
+  function addLog(task, by, type, msg, extra = {}) {
+    task.log = task.log || [];
+    const entry = { k: newKey(task.log), t: now(), by, type, msg, ...extra };
+    task.log.push(entry);
+    task.updated = entry.t;
+    return entry;
+  }
+  function normStatus(s) {
+    const v = String(s || '').trim().toLowerCase().replace(/\s+/g, '_');
+    const r = STATUS_ALIAS[v] || v;
+    if (!STATUSES.includes(r)) fail(`unknown status "${s}" (use: ${STATUSES.join(', ')})`);
+    return r;
+  }
+  function normPriority(p) {
+    if (p === undefined || p === null || p === '') return 'normal';
+    const v = String(p).toLowerCase();
+    const map = { h: 'high', hi: 'high', 1: 'high', n: 'normal', med: 'normal', medium: 'normal', 2: 'normal', l: 'low', lo: 'low', 3: 'low' };
+    const r = map[v] || v;
+    if (!PRIORITIES.includes(r)) fail(`unknown priority "${p}" (use: high, normal, low)`);
+    return r;
+  }
+  const splitList = (v) => (Array.isArray(v) ? v : String(v || '').split(/[;\n]/)).map((s) => String(s).trim()).filter(Boolean);
+  const splitLabels = (v) => (Array.isArray(v) ? v : String(v || '').split(',')).map((s) => String(s).trim()).filter(Boolean);
+  const openIssues = (t) => (t.log || []).filter((e) => e.type === 'issue' && !e.resolved);
+  const stepCount = (t) => ({ done: (t.steps || []).filter((s) => s.done).length, total: (t.steps || []).length });
+  const idNum = (id) => Number(String(id).split('-').pop()) || 0;
+  function sortTasks(list, status) {
+    if (status === 'todo') return list.sort((a, b) => priRank[a.priority] - priRank[b.priority] || idNum(a.id) - idNum(b.id));
+    return list.sort((a, b) => (b.updated || '').localeCompare(a.updated || ''));
+  }
+
+  // Every operation mutates the in-memory board `st` and returns { msg, out }.
+  const apply = {
+    add(st, o, by) {
+      const title = String(o.title || '').trim();
+      if (!title) fail('a task needs a title');
+      const id = `${st.config.prefix}-${nextNum(st)}`;
+      const t = {
+        id, uid: rand(6), title, status: o.status ? normStatus(o.status) : 'todo',
+        priority: normPriority(o.priority), labels: splitLabels(o.labels),
+        parent: o.parent ? normId(st, o.parent) : null,
+        description: String(o.description || '').trim(),
+        assignee: null, branch: null, worktree: null, summary: null,
+        created: now(), updated: now(), steps: [], log: [],
+      };
+      for (const text of splitList(o.steps)) t.steps.push({ k: newKey(t.steps), text, done: false });
+      addLog(t, by, 'created', 'created');
+      st.tasks.set(id, { data: t });
+      return { msg: `add ${id}: ${title}`, out: id };
+    },
+    start(st, id, by, where = {}) {
+      const t = getTask(st, id);
+      const prev = t.status;
+      const warn = prev === 'in_progress' && t.assignee && t.assignee !== by ? `note: ${t.id} was in progress by ${t.assignee}` : null;
+      t.status = 'in_progress';
+      t.assignee = by;
+      t.branch = where.branch || null;
+      t.worktree = where.worktree || null;
+      addLog(t, by, 'status', `started (${prev} → in_progress)${t.branch ? ` on ${t.branch}` : ''}`);
+      return { msg: `start ${t.id}`, out: { id: t.id, warn } };
+    },
+    move(st, id, status, by, note) {
+      const s = normStatus(status);
+      const t = getTask(st, id);
+      const prev = t.status;
+      t.status = s;
+      addLog(t, by, 'status', `${prev} → ${s}${note ? `: ${note}` : ''}`);
+      return { msg: `move ${t.id} ${s}`, out: t.id };
+    },
+    done(st, id, summary, by) {
+      const t = getTask(st, id);
+      t.status = 'done';
+      if (summary) t.summary = summary;
+      addLog(t, by, 'done', summary || 'done');
+      return { msg: `done ${t.id}`, out: t.id };
+    },
+    log(st, id, type, msg, by) {
+      if (!String(msg || '').trim()) fail('empty message');
+      const ty = ['progress', 'note', 'issue'].includes(type) ? type : 'progress';
+      const t = getTask(st, id);
+      const e = addLog(t, by, ty, String(msg).trim());
+      return { msg: `${ty} ${t.id}`, out: { id: t.id, k: e.k } };
+    },
+    resolve(st, id, k, msg, by) {
+      const t = getTask(st, id);
+      const key = String(k || '').replace(/^#/, '');
+      const e = (t.log || []).find((x) => x.k === key && x.type === 'issue');
+      if (!e) fail(`no issue #${key} on ${t.id}`);
+      e.resolved = { t: now(), by, msg: msg || null };
+      t.updated = e.resolved.t;
+      return { msg: `resolve ${t.id}#${key}`, out: t.id };
+    },
+    addSteps(st, id, texts, by) {
+      const list = splitList(texts);
+      if (!list.length) fail('no steps given');
+      const t = getTask(st, id);
+      t.steps = t.steps || [];
+      const keys = list.map((text) => { const k = newKey(t.steps); t.steps.push({ k, text, done: false }); return k; });
+      t.updated = now();
+      return { msg: `steps ${t.id}`, out: { id: t.id, keys } };
+    },
+    tick(st, id, keys, done, by) {
+      const t = getTask(st, id);
+      for (const raw of keys) {
+        const k = String(raw).replace(/^#/, '');
+        // accept a step key or a 1-based step number
+        const s = (t.steps || []).find((x) => x.k === k) || (/^\d{1,3}$/.test(k) ? (t.steps || [])[Number(k) - 1] : null);
+        if (!s) fail(`no step ${k} on ${t.id}`);
+        s.done = done;
+      }
+      t.updated = now();
+      return { msg: `tick ${t.id}`, out: stepCount(t) };
+    },
+    removeStep(st, id, k, by) {
+      const t = getTask(st, id);
+      const before = (t.steps || []).length;
+      t.steps = (t.steps || []).filter((s) => s.k !== k);
+      if (t.steps.length === before) fail(`no step ${k}`);
+      t.updated = now();
+      return { msg: `unstep ${t.id}`, out: t.id };
+    },
+    edit(st, id, f, by) {
+      const t = getTask(st, id);
+      const changed = [];
+      if (f.title !== undefined && String(f.title).trim() && f.title !== t.title) { t.title = String(f.title).trim(); changed.push('title'); }
+      if (f.description !== undefined && f.description !== t.description) { t.description = String(f.description); changed.push('description'); }
+      if (f.priority !== undefined) { const p = normPriority(f.priority); if (p !== t.priority) { t.priority = p; changed.push('priority'); } }
+      if (f.labels !== undefined) { t.labels = splitLabels(f.labels); changed.push('labels'); }
+      if (f.parent !== undefined) { t.parent = f.parent ? normId(st, f.parent) : null; changed.push('parent'); }
+      if (f.assignee !== undefined) { t.assignee = f.assignee || null; changed.push('assignee'); }
+      if (f.status !== undefined) {
+        const s = normStatus(f.status);
+        if (s !== t.status) { addLog(t, by, 'status', `${t.status} → ${s}`); t.status = s; }
+      }
+      t.updated = now();
+      return { msg: `edit ${t.id}${changed.length ? ` (${changed.join(', ')})` : ''}`, out: t.id };
+    },
+    rm(st, id, by) {
+      const t = getTask(st, id);
+      st.tasks.delete(t.id);
+      st.config.deleted = [...new Set([...(st.config.deleted || []), t.uid])];
+      return { msg: `rm ${t.id}: ${t.title}`, out: t.id };
+    },
+  };
+
+  // ── merge (used by sync) ──
+  function unionBy(primary = [], secondary = [], combine) {
+    const map = new Map();
+    for (const x of primary) map.set(x.k, x);
+    for (const y of secondary) map.set(y.k, map.has(y.k) ? combine(map.get(y.k), y) : y);
+    return [...map.values()];
+  }
+  function mergeTask(a, b) {
+    const newer = (a.updated || '') >= (b.updated || '') ? a : b;
+    const older = newer === a ? b : a;
+    const m = { ...older, ...newer };
+    m.log = unionBy(newer.log, older.log, (x, y) => ({ ...x, resolved: x.resolved || y.resolved }))
+      .sort((x, y) => (x.t < y.t ? -1 : x.t > y.t ? 1 : 0));
+    m.steps = unionBy(newer.steps, older.steps, (x, y) => ({ ...x, done: x.done || y.done }));
+    return m;
+  }
+  function mergeBoards(L, R) {
+    const deleted = new Set([...(L.config.deleted || []), ...(R.config.deleted || [])]);
+    const config = { ...L.config, ...R.config, deleted: [...deleted] };
+    const out = { commit: null, config, tasks: new Map() };
+    const byUid = new Map();
+    for (const [id, t] of R.tasks) {
+      if (deleted.has(t.data.uid)) continue;
+      out.tasks.set(id, t);
+      byUid.set(t.data.uid, id);
+    }
+    const renamed = [];
+    const pending = [];
+    for (const [, t] of L.tasks) {
+      if (deleted.has(t.data.uid)) continue;
+      const rid = byUid.get(t.data.uid);
+      if (rid) out.tasks.set(rid, { ...out.tasks.get(rid), data: mergeTask(t.data, out.tasks.get(rid).data) });
+      else pending.push(t);
+    }
+    for (const t of pending) {
+      const id = t.data.id;
+      if (out.tasks.has(id)) {
+        // Two disconnected clones created the same ID: renumber the local one.
+        const newId = `${config.prefix}-${nextNum(out)}`;
+        renamed.push([id, newId]);
+        const data = { ...t.data, id: newId };
+        addLog(data, 'tb', 'note', `renumbered from ${id} during sync (ID collision)`);
+        out.tasks.set(newId, { data });
+      } else out.tasks.set(id, t);
+    }
+    return { st: out, renamed };
+  }
+
+  // ── derived files stored next to the tasks ──
+  function renderBoardMd(st) {
+    const cell = (s) => String(s || '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+    let md = '# Task board\n\n_Generated by tb.mjs — change it with `node tb.mjs` or `node tb.mjs ui`, not by hand._\n';
+    const all = [...st.tasks.values()].map((t) => t.data);
+    for (const s of STATUSES) {
+      const list = sortTasks(all.filter((t) => t.status === s), s);
+      if (!list.length) continue;
+      md += `\n## ${STATUS_LABEL[s]} (${list.length})\n\n| ID | Title | Who | Steps | Issues | Updated |\n|---|---|---|---|---|---|\n`;
+      for (const t of list) {
+        const sc = stepCount(t);
+        md += `| ${t.id} | ${cell(t.title)}${t.priority === 'high' ? ' **(high)**' : ''} | ${cell(t.assignee)} | ${sc.total ? `${sc.done}/${sc.total}` : ''} | ${openIssues(t).length || ''} | ${(t.updated || '').slice(0, 10)} |\n`;
+      }
+    }
+    return md;
+  }
+  /** All tasks in one file, so a web page can load the board with a single request. */
+  function boardJson(st) {
+    const tasks = [...st.tasks.values()].map((t) => t.data).sort((a, b) => idNum(a.id) - idNum(b.id));
+    return JSON.stringify({ config: st.config, tasks }) + '\n';
+  }
+  /** Rebuild a board from board.json (used by the web page). */
+  function fromBoardJson(text, commit) {
+    const j = JSON.parse(text);
+    const st = { commit, config: { prefix: 'TB', deleted: [], ...(j.config || {}) }, tasks: new Map() };
+    for (const data of j.tasks || []) st.tasks.set(data.id, { data, raw: ser(data) });
+    return st;
+  }
+
+  return {
+    STATUSES, STATUS_LABEL, PRIORITIES, UserError, fail, now, ser, normId, getTask, nextNum, newKey, addLog,
+    normStatus, normPriority, splitList, splitLabels, openIssues, stepCount, idNum, sortTasks, apply,
+    mergeTask, mergeBoards, renderBoardMd, boardJson, fromBoardJson,
+  };
+}
+
+const C = makeCore((n) => crypto.randomBytes(n).toString('hex'));
+const {
+  STATUSES, STATUS_LABEL, UserError, fail, ser, normId, getTask, normStatus,
+  splitList, openIssues, stepCount, sortTasks,
+} = C;
 
 // ───────────────────────────── git plumbing ─────────────────────────────
 
@@ -110,8 +375,6 @@ const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 
 
 // ───────────────────────────── board storage ─────────────────────────────
 
-const ser = (obj) => JSON.stringify(obj, null, 2) + '\n';
-
 function readBoard(commit) {
   const st = { commit, config: { prefix: 'TB', deleted: [] }, tasks: new Map() };
   if (!commit) return st;
@@ -142,7 +405,8 @@ function writeBoard(st, parents, message) {
   }
   const root = mktree([
     `100644 blob ${hashBlob(ser(st.config))}\tconfig.json`,
-    `100644 blob ${hashBlob(renderBoardMd(st))}\tBOARD.md`,
+    `100644 blob ${hashBlob(C.renderBoardMd(st))}\tBOARD.md`,
+    `100644 blob ${hashBlob(C.boardJson(st))}\tboard.json`,
     `040000 tree ${mktree(taskLines)}\ttasks`,
   ]);
   const args = ['commit-tree', root];
@@ -171,63 +435,6 @@ function mutate(fn) {
 
 // ───────────────────────────── task helpers ─────────────────────────────
 
-const now = () => new Date().toISOString();
-const rid = (n) => crypto.randomBytes(n).toString('hex');
-
-function normId(st, id) {
-  if (id === undefined || id === null || id === '') fail('missing task ID');
-  const s = String(id).trim().toUpperCase().replace(/^#/, '');
-  return /^\d+$/.test(s) ? `${st.config.prefix}-${s}` : s;
-}
-
-function getTask(st, id) {
-  const t = st.tasks.get(normId(st, id));
-  if (!t) fail(`no task ${id}`);
-  return t.data;
-}
-
-function nextNum(st) {
-  let max = 0;
-  const re = new RegExp(`^${st.config.prefix}-(\\d+)$`);
-  for (const id of st.tasks.keys()) { const m = re.exec(id); if (m) max = Math.max(max, Number(m[1])); }
-  return max + 1;
-}
-
-function newKey(list) {
-  const used = new Set((list || []).map((x) => x.k));
-  let k; do k = rid(2); while (used.has(k));
-  return k;
-}
-
-function addLog(task, by, type, msg, extra = {}) {
-  task.log = task.log || [];
-  const entry = { k: newKey(task.log), t: now(), by, type, msg, ...extra };
-  task.log.push(entry);
-  task.updated = entry.t;
-  return entry;
-}
-
-function normStatus(s) {
-  const v = String(s || '').trim().toLowerCase().replace(/\s+/g, '_');
-  const r = STATUS_ALIAS[v] || v;
-  if (!STATUSES.includes(r)) fail(`unknown status "${s}" (use: ${STATUSES.join(', ')})`);
-  return r;
-}
-
-function normPriority(p) {
-  if (p === undefined || p === null || p === '') return 'normal';
-  const v = String(p).toLowerCase();
-  const map = { h: 'high', hi: 'high', '1': 'high', n: 'normal', med: 'normal', medium: 'normal', '2': 'normal', l: 'low', lo: 'low', '3': 'low' };
-  const r = map[v] || v;
-  if (!PRIORITIES.includes(r)) fail(`unknown priority "${p}" (use: high, normal, low)`);
-  return r;
-}
-
-const splitList = (v) => (Array.isArray(v) ? v : String(v || '').split(/[;\n]/)).map((s) => String(s).trim()).filter(Boolean);
-const splitLabels = (v) => (Array.isArray(v) ? v : String(v || '').split(',')).map((s) => String(s).trim()).filter(Boolean);
-const openIssues = (t) => (t.log || []).filter((e) => e.type === 'issue' && !e.resolved);
-const stepCount = (t) => ({ done: (t.steps || []).filter((s) => s.done).length, total: (t.steps || []).length });
-
 function currentBranch() {
   const b = (git(['branch', '--show-current'], { allowFail: true }) || '').trim();
   if (b) return b;
@@ -239,201 +446,23 @@ const defaultAgent = () => process.env.TB_AGENT || currentBranch() || 'agent';
 
 // ───────────────────────────── operations (shared by CLI + UI) ─────────────────────────────
 
+const where = () => ({ branch: currentBranch(), worktree: topLevel() });
 const ops = {
-  add(o, by) {
-    const title = String(o.title || '').trim();
-    if (!title) fail('a task needs a title');
-    return mutate((st) => {
-      const id = `${st.config.prefix}-${nextNum(st)}`;
-      const t = {
-        id, uid: rid(6), title, status: o.status ? normStatus(o.status) : 'todo',
-        priority: normPriority(o.priority), labels: splitLabels(o.labels),
-        parent: o.parent ? normId(st, o.parent) : null,
-        description: String(o.description || '').trim(),
-        assignee: null, branch: null, worktree: null, summary: null,
-        created: now(), updated: now(), steps: [], log: [],
-      };
-      for (const text of splitList(o.steps)) t.steps.push({ k: newKey(t.steps), text, done: false });
-      addLog(t, by, 'created', 'created');
-      st.tasks.set(id, { data: t });
-      return { msg: `add ${id}: ${title}`, out: id };
-    });
-  },
-
-  start(id, by, o = {}) {
-    return mutate((st) => {
-      const t = getTask(st, id);
-      const prev = t.status;
-      const warn = prev === 'in_progress' && t.assignee && t.assignee !== by ? `note: ${t.id} was in progress by ${t.assignee}` : null;
-      t.status = 'in_progress';
-      t.assignee = by;
-      t.branch = o.branch !== undefined ? o.branch : currentBranch();
-      t.worktree = o.worktree !== undefined ? o.worktree : topLevel();
-      addLog(t, by, 'status', `started (${prev} → in_progress)${t.branch ? ` on ${t.branch}` : ''}`);
-      return { msg: `start ${t.id}`, out: { id: t.id, warn } };
-    });
-  },
-
-  move(id, status, by, note) {
-    const s = normStatus(status);
-    return mutate((st) => {
-      const t = getTask(st, id);
-      const prev = t.status;
-      t.status = s;
-      addLog(t, by, 'status', `${prev} → ${s}${note ? `: ${note}` : ''}`);
-      return { msg: `move ${t.id} ${s}`, out: t.id };
-    });
-  },
-
-  done(id, summary, by) {
-    return mutate((st) => {
-      const t = getTask(st, id);
-      t.status = 'done';
-      if (summary) t.summary = summary;
-      addLog(t, by, 'done', summary || 'done');
-      return { msg: `done ${t.id}`, out: t.id };
-    });
-  },
-
-  log(id, type, msg, by) {
-    if (!String(msg || '').trim()) fail('empty message');
-    const ty = ['progress', 'note', 'issue'].includes(type) ? type : 'progress';
-    return mutate((st) => {
-      const t = getTask(st, id);
-      const e = addLog(t, by, ty, String(msg).trim());
-      return { msg: `${ty} ${t.id}`, out: { id: t.id, k: e.k } };
-    });
-  },
-
-  resolve(id, k, msg, by) {
-    return mutate((st) => {
-      const t = getTask(st, id);
-      const key = String(k || '').replace(/^#/, '');
-      const e = (t.log || []).find((x) => x.k === key && x.type === 'issue');
-      if (!e) fail(`no issue #${key} on ${t.id}`);
-      e.resolved = { t: now(), by, msg: msg || null };
-      t.updated = e.resolved.t;
-      return { msg: `resolve ${t.id}#${key}`, out: t.id };
-    });
-  },
-
-  addSteps(id, texts, by) {
-    const list = splitList(texts);
-    if (!list.length) fail('no steps given');
-    return mutate((st) => {
-      const t = getTask(st, id);
-      t.steps = t.steps || [];
-      const keys = list.map((text) => { const k = newKey(t.steps); t.steps.push({ k, text, done: false }); return k; });
-      t.updated = now();
-      return { msg: `steps ${t.id}`, out: { id: t.id, keys } };
-    });
-  },
-
-  tick(id, keys, done, by) {
-    return mutate((st) => {
-      const t = getTask(st, id);
-      const ks = keys.map((k) => String(k).replace(/^#/, ''));
-      for (const k of ks) {
-        // accept a key or a 1-based step number
-        const s = (t.steps || []).find((x) => x.k === k) || (/^\d+$/.test(k) && k.length < 4 ? t.steps[Number(k) - 1] : null);
-        if (!s) fail(`no step ${k} on ${t.id}`);
-        s.done = done;
-      }
-      t.updated = now();
-      return { msg: `tick ${t.id}`, out: stepCount(t) };
-    });
-  },
-
-  removeStep(id, k, by) {
-    return mutate((st) => {
-      const t = getTask(st, id);
-      const before = (t.steps || []).length;
-      t.steps = (t.steps || []).filter((s) => s.k !== k);
-      if (t.steps.length === before) fail(`no step ${k}`);
-      t.updated = now();
-      return { msg: `unstep ${t.id}`, out: t.id };
-    });
-  },
-
-  edit(id, f, by) {
-    return mutate((st) => {
-      const t = getTask(st, id);
-      const changed = [];
-      if (f.title !== undefined && String(f.title).trim() && f.title !== t.title) { t.title = String(f.title).trim(); changed.push('title'); }
-      if (f.description !== undefined && f.description !== t.description) { t.description = String(f.description); changed.push('description'); }
-      if (f.priority !== undefined) { const p = normPriority(f.priority); if (p !== t.priority) { t.priority = p; changed.push('priority'); } }
-      if (f.labels !== undefined) { t.labels = splitLabels(f.labels); changed.push('labels'); }
-      if (f.parent !== undefined) { t.parent = f.parent ? normId(st, f.parent) : null; changed.push('parent'); }
-      if (f.assignee !== undefined) { t.assignee = f.assignee || null; changed.push('assignee'); }
-      if (f.status !== undefined) {
-        const s = normStatus(f.status);
-        if (s !== t.status) { addLog(t, by, 'status', `${t.status} → ${s}`); t.status = s; }
-      }
-      t.updated = now();
-      return { msg: `edit ${t.id}${changed.length ? ` (${changed.join(', ')})` : ''}`, out: t.id };
-    });
-  },
-
-  rm(id, by) {
-    return mutate((st) => {
-      const t = getTask(st, id);
-      st.tasks.delete(t.id);
-      st.config.deleted = [...new Set([...(st.config.deleted || []), t.uid])];
-      return { msg: `rm ${t.id}: ${t.title}`, out: t.id };
-    });
-  },
+  add: (o, by) => mutate((st) => C.apply.add(st, o, by)),
+  start: (id, by) => { const w = where(); return mutate((st) => C.apply.start(st, id, by, w)); },
+  move: (id, status, by, note) => mutate((st) => C.apply.move(st, id, status, by, note)),
+  done: (id, summary, by) => mutate((st) => C.apply.done(st, id, summary, by)),
+  log: (id, type, msg, by) => mutate((st) => C.apply.log(st, id, type, msg, by)),
+  resolve: (id, k, msg, by) => mutate((st) => C.apply.resolve(st, id, k, msg, by)),
+  addSteps: (id, texts, by) => mutate((st) => C.apply.addSteps(st, id, texts, by)),
+  tick: (id, keys, done, by) => mutate((st) => C.apply.tick(st, id, keys, done, by)),
+  removeStep: (id, k, by) => mutate((st) => C.apply.removeStep(st, id, k, by)),
+  edit: (id, f, by) => mutate((st) => C.apply.edit(st, id, f, by)),
+  rm: (id, by) => mutate((st) => C.apply.rm(st, id, by)),
 };
 
+
 // ───────────────────────────── sync / merge ─────────────────────────────
-
-function unionBy(primary = [], secondary = [], combine) {
-  const map = new Map();
-  for (const x of primary) map.set(x.k, x);
-  for (const y of secondary) map.set(y.k, map.has(y.k) ? combine(map.get(y.k), y) : y);
-  return [...map.values()];
-}
-
-function mergeTask(a, b) {
-  const newer = (a.updated || '') >= (b.updated || '') ? a : b;
-  const older = newer === a ? b : a;
-  const m = { ...older, ...newer };
-  m.log = unionBy(newer.log, older.log, (x, y) => ({ ...x, resolved: x.resolved || y.resolved }))
-    .sort((x, y) => (x.t < y.t ? -1 : x.t > y.t ? 1 : 0));
-  m.steps = unionBy(newer.steps, older.steps, (x, y) => ({ ...x, done: x.done || y.done }));
-  return m;
-}
-
-function mergeBoards(L, R) {
-  const deleted = new Set([...(L.config.deleted || []), ...(R.config.deleted || [])]);
-  const config = { ...L.config, ...R.config, deleted: [...deleted] };
-  const out = { commit: null, config, tasks: new Map() };
-  const byUid = new Map();
-  for (const [id, t] of R.tasks) {
-    if (deleted.has(t.data.uid)) continue;
-    out.tasks.set(id, t);
-    byUid.set(t.data.uid, id);
-  }
-  const renamed = [];
-  const pending = [];
-  for (const [, t] of L.tasks) {
-    if (deleted.has(t.data.uid)) continue;
-    const rid2 = byUid.get(t.data.uid);
-    if (rid2) out.tasks.set(rid2, { ...out.tasks.get(rid2), data: mergeTask(t.data, out.tasks.get(rid2).data) });
-    else pending.push(t);
-  }
-  for (const t of pending) {
-    let id = t.data.id;
-    if (out.tasks.has(id)) {
-      // Two disconnected clones created the same ID: renumber the local one.
-      const newId = `${config.prefix}-${nextNum(out)}`;
-      renamed.push([id, newId]);
-      const data = { ...t.data, id: newId };
-      addLog(data, 'tb', 'note', `renumbered from ${id} during sync (ID collision)`);
-      out.tasks.set(newId, { data });
-    } else out.tasks.set(id, t);
-  }
-  return { st: out, renamed };
-}
 
 function hasRemote() {
   return (git(['remote'], { allowFail: true }) || '').split(/\r?\n/).includes(REMOTE);
@@ -461,7 +490,7 @@ function sync({ quiet = false } = {}) {
     let toPush = local;
     let renamed = [];
     if (remote && git(['merge-base', '--is-ancestor', remote, local], { allowFail: true }) === null) {
-      const merged = mergeBoards(readBoard(local), readBoard(remote));
+      const merged = C.mergeBoards(readBoard(local), readBoard(remote));
       renamed = merged.renamed;
       const c = writeBoard(merged.st, [local, remote], 'sync: merge remote board');
       if (git(['update-ref', REF, c, local], { allowFail: true }) === null) continue;
@@ -495,30 +524,6 @@ function ago(iso) {
   return `${Math.floor(s / 86400)}d ago`;
 }
 const trunc = (s, n) => { s = String(s || '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
-const priRank = { high: 0, normal: 1, low: 2 };
-const idNum = (id) => Number(String(id).split('-').pop()) || 0;
-
-function sortTasks(list, status) {
-  if (status === 'todo') return list.sort((a, b) => priRank[a.priority] - priRank[b.priority] || idNum(a.id) - idNum(b.id));
-  return list.sort((a, b) => (b.updated || '').localeCompare(a.updated || ''));
-}
-
-function renderBoardMd(st) {
-  const cell = (s) => String(s || '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
-  let md = '# Task board\n\n_Generated by tb.mjs — change it with `node tb.mjs` or `node tb.mjs ui`, not by hand._\n';
-  const all = [...st.tasks.values()].map((t) => t.data);
-  for (const s of STATUSES) {
-    const list = sortTasks(all.filter((t) => t.status === s), s);
-    if (!list.length) continue;
-    md += `\n## ${STATUS_LABEL[s]} (${list.length})\n\n| ID | Title | Who | Steps | Issues | Updated |\n|---|---|---|---|---|---|\n`;
-    for (const t of list) {
-      const sc = stepCount(t);
-      md += `| ${t.id} | ${cell(t.title)}${t.priority === 'high' ? ' **(high)**' : ''} | ${cell(t.assignee)} | ${sc.total ? `${sc.done}/${sc.total}` : ''} | ${openIssues(t).length || ''} | ${(t.updated || '').slice(0, 10)} |\n`;
-    }
-  }
-  return md;
-}
-
 function printShow(t) {
   const sc = stepCount(t);
   const L = [];
@@ -705,10 +710,32 @@ function worktreeInfo() {
   return list;
 }
 
-function uiHtml() {
+/** Text of an embedded block at the end of this file (the UI page, the GitHub backend). */
+function embedded(name) {
   const src = fs.readFileSync(SCRIPT, 'utf8');
-  const a = src.lastIndexOf('/*__UI__'), b = src.lastIndexOf('__UI__*/');
-  return src.slice(a + 8, b);
+  const a = src.lastIndexOf('/*' + name), b = src.lastIndexOf(name + '*/');
+  return src.slice(a + 2 + name.length, b);
+}
+const uiHtml = () => embedded('__UI__');
+
+/** The board as one static page that talks to the GitHub API (for GitHub Pages). */
+function pagesHtml() {
+  const backend = embedded('__GH__').replace('__CORE__', () => makeCore.toString());
+  return uiHtml().replace('<!--BACKEND-->', () => backend);
+}
+
+function cmdPages(flags) {
+  const top = topLevel();
+  const out = path.resolve(top, flags.out || 'docs/index.html');
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  fs.writeFileSync(out, pagesHtml());
+  const nojekyll = path.join(path.dirname(out), '.nojekyll');
+  if (!fs.existsSync(nojekyll)) fs.writeFileSync(nojekyll, '');
+  const rel = path.relative(top, out).split(path.sep).join('/');
+  console.log(`Wrote ${rel} (static board that reads and edits the '${BRANCH}' branch via the GitHub API).`);
+  console.log(`\nTo publish it:\n  1. commit and push ${rel}\n  2. GitHub → repo Settings → Pages → Deploy from a branch → your default branch, folder /${path.dirname(rel) === 'docs' ? 'docs' : '(root)'}`);
+  console.log(`  3. open the Pages URL; it shows this repo's board (add ?repo=owner/name to show another one)`);
+  console.log(`\nThe page only sees what is pushed: run '${cmdName()} sync' (or set TB_AUTOSYNC=1) so agent updates show up.`);
 }
 
 function cmdUi(flags) {
@@ -823,6 +850,7 @@ function help() {
 Setup
   ${C} init [--prefix TB]          create the board + agent instructions in CLAUDE.md
   ${C} ui [--port 4477] [--no-open] open the Kanban board in your browser
+  ${C} pages [--out docs/index.html] generate a GitHub Pages version of the board
 
 Reading
   ${C} context                      compact briefing for a new agent session
@@ -864,6 +892,7 @@ function main() {
 
   switch (cmd) {
     case 'init': return cmdInit(flags);
+    case 'pages': return cmdPages(flags);
     case 'ui': case 'board': case 'gui': needBoard(); return cmdUi(flags);
     case 'context': case 'ctx': case 'brief': needBoard(); return printContext(readBoard(headCommit()));
     case 'list': case 'ls': needBoard(); return printList(readBoard(headCommit()), flags);
@@ -1018,6 +1047,9 @@ textarea:focus,.inp:focus,select:focus{outline:none;border-color:var(--accent)}
 .msg{white-space:pre-wrap;word-break:break-word}.resolved{color:var(--faint);text-decoration:line-through}
 .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:9px 14px;border-radius:8px;font-size:13px;z-index:20;display:none}
 .hint{color:var(--faint);font-size:12px}
+@media (max-width:720px){header{flex-wrap:wrap;gap:8px 12px;padding:10px 14px}.stats{order:3;width:100%;overflow-x:auto;gap:10px}.search{width:auto;flex:1;min-width:0;order:2}h1{order:1}header .spacer{display:none}#extra,#sync,.conn{order:2}
+.board{grid-template-columns:repeat(5,86vw);scroll-snap-type:x mandatory;padding:12px 14px 40px;gap:10px}.col{scroll-snap-align:center}.drawer{padding:14px 16px 60px}}
+.ro .newtask,.ro .compose,.ro [data-a=rm],.ro [data-a=post],.ro [data-a=composer],.ro #ctype,.ro [data-a=addstep],.ro .step .x,.ro [data-a=resolve]{display:none}
 </style></head><body>
 <header>
   <h1 id="h1">Task board</h1>
@@ -1025,11 +1057,13 @@ textarea:focus,.inp:focus,select:focus{outline:none;border-color:var(--accent)}
   <div class="spacer"></div>
   <input class="search" id="q" placeholder="Filter…  ( / )">
   <button id="sync" style="display:none">Sync</button>
+  <span id="extra"></span>
   <span class="conn" id="conn" title="connected"></span>
 </header>
 <main class="board" id="board"></main>
 <aside class="drawer" id="drawer"></aside>
 <div class="toast" id="toast"></div>
+<!--BACKEND-->
 <script>
 const STATUSES=['todo','in_progress','review','blocked','done'];
 const LABEL={todo:'To do',in_progress:'In progress',review:'Review',blocked:'Blocked',done:'Done'};
@@ -1040,18 +1074,28 @@ const ago=iso=>{if(!iso)return'';const s=(Date.now()-new Date(iso))/1e3;if(s<60)
 const when=iso=>new Date(iso).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
 const pr={high:0,normal:1,low:2};const num=id=>+String(id).split('-').pop()||0;
 function toast(m){const t=$('#toast');t.textContent=m;t.style.display='block';clearTimeout(t._h);t._h=setTimeout(()=>t.style.display='none',3500)}
+// Data access: the local `tb ui` server by default; `tb pages` injects a GitHub API backend as window.TB_BACKEND.
+const getJson=async u=>{const r=await fetch(u);if(!r.ok)throw new Error('server error '+r.status);return r.json()};
+const B=window.TB_BACKEND||{mode:'local',poll:()=>1500,
+  head:async()=>(await getJson('/api/head')).commit,
+  board:()=>getJson('/api/board'),
+  worktrees:()=>getJson('/api/worktrees'),
+  op:async body=>{const r=await fetch('/api/op',{method:'POST',headers:{'content-type':'application/json','x-tb':'1'},body:JSON.stringify(body)});
+    const j=await r.json();if(!j.ok)throw new Error(j.error);return j.result}};
 async function op(body){
   document.activeElement&&document.activeElement.blur&&document.activeElement.blur();
-  try{const r=await fetch('/api/op',{method:'POST',headers:{'content-type':'application/json','x-tb':'1'},body:JSON.stringify(body)});
-  const j=await r.json();if(!j.ok)toast(j.error);await refresh(true);return j.result}catch(e){toast('Request failed: '+e.message)}
+  try{const res=await B.op(body);await refresh(true);return res}catch(e){toast(e.message);refresh(true)}
 }
 async function refresh(force){
-  try{const h=await(await fetch('/api/head')).json();
-    if(force||h.commit!==S.head){S.board=await(await fetch('/api/board')).json();S.head=S.board.commit;render()}
-    $('#conn').className='conn';$('#conn').title='connected'}
-  catch(e){$('#conn').className='conn off';$('#conn').title='server not reachable'}
+  try{const h=await B.head();
+    if(force||h!==S.head){S.board=await B.board();S.head=S.board.commit;render()}
+    $('#conn').className='conn';$('#conn').title='connected';S.err=null}
+  catch(e){$('#conn').className='conn off';$('#conn').title=e.message;
+    if(S.err!==e.message){S.err=e.message;toast(e.message)}
+    if(!S.board)$('#board').innerHTML='<div class="empty" style="grid-column:1/-1;font-size:14px;padding:40px;text-align:center">'+esc(e.message)+'</div>'}
 }
-async function loadWts(){try{S.wts=await(await fetch('/api/worktrees')).json();renderBoard()}catch{}}
+window.tbRefresh=refresh;
+async function loadWts(){if(!B.worktrees)return;try{S.wts=await B.worktrees();renderBoard()}catch{}}
 function dirtyFor(t){if(t.status==='done')return 0;const w=S.wts.find(w=>(t.worktree&&w.path===t.worktree)||(t.branch&&w.branch===t.branch));return w&&w.dirty?w.dirty:0}
 const openIssues=t=>(t.log||[]).filter(e=>e.type==='issue'&&!e.resolved);
 function matches(t){if(!S.q)return true;const q=S.q.toLowerCase();return[t.id,t.title,t.assignee,t.branch,(t.labels||[]).join(' '),t.description].join(' ').toLowerCase().includes(q)}
@@ -1061,7 +1105,8 @@ function renderHeader(){
   const b=S.board;$('#h1').innerHTML=esc(b.repo)+' <span>· '+esc(b.prefix)+'</span>';document.title=b.repo+' · Task board';
   const c=s=>b.tasks.filter(t=>t.status===s).length;const iss=b.tasks.reduce((n,t)=>n+openIssues(t).length,0);
   $('#stats').innerHTML=['in_progress','review','blocked','todo','done'].map(s=>'<span><b>'+c(s)+'</b> '+LABEL[s].toLowerCase()+'</span>').join('')+(iss?'<span style="color:var(--blocked)"><b style="color:inherit">'+iss+'</b> open issue'+(iss>1?'s':'')+'</span>':'');
-  $('#sync').style.display=b.remote?'':'none';
+  $('#sync').style.display=b.remote&&B.mode==='local'?'':'none';
+  document.body.classList.toggle('ro',!!b.readOnly);
 }
 function card(t){
   const st=t.steps||[],dn=st.filter(s=>s.done).length,oi=openIssues(t).length,dirty=dirtyFor(t);
@@ -1071,7 +1116,7 @@ function card(t){
   if(oi)chips.push('<span class="chip issue">'+oi+' issue'+(oi>1?'s':'')+'</span>');
   if(dirty)chips.push('<span class="chip dirty" title="uncommitted files in '+esc(t.worktree||t.branch)+'">'+dirty+' uncommitted</span>');
   (t.labels||[]).forEach(l=>chips.push('<span class="chip">#'+esc(l)+'</span>'));
-  return '<div class="card'+(S.open===t.id?' sel':'')+'" draggable="true" data-id="'+esc(t.id)+'">'+
+  return '<div class="card'+(S.open===t.id?' sel':'')+'" draggable="'+(!S.board.readOnly)+'" data-id="'+esc(t.id)+'">'+
     '<div class="top"><span class="mono">'+esc(t.id)+'</span>'+(t.priority!=='normal'?'<span class="pri '+t.priority+'">'+t.priority+'</span>':'')+'<span class="spacer"></span><span>'+ago(t.updated)+'</span></div>'+
     '<div class="ttl">'+esc(t.title)+'</div>'+
     (st.length?'<div class="bar" title="'+dn+'/'+st.length+' steps"><i style="width:'+(100*dn/st.length)+'%"></i></div>':'')+
@@ -1120,6 +1165,7 @@ function renderDrawer(force){
    (log.length?log.map(e=>'<div class="entry"><span class="pill '+e.type+'">'+e.type+'</span><div class="msg'+(e.type==='issue'&&e.resolved?' resolved':'')+'">'+esc(e.msg)+'</div>'+
      (e.type==='issue'&&e.resolved?'<div class="when" style="grid-column:2">resolved by '+esc(e.resolved.by)+(e.resolved.msg?': '+esc(e.resolved.msg):'')+'</div>':'')+
      '<div class="when">'+esc(e.by)+' · '+when(e.t)+'</div></div>').join(''):'<div class="hint">No activity yet.</div>');
+  if(S.board.readOnly)d.querySelectorAll('input,select,textarea').forEach(e=>e.disabled=true);
 }
 function openTask(id){S.open=id;renderBoard();renderDrawer(true)}
 // board events
@@ -1161,7 +1207,150 @@ document.addEventListener('keydown',e=>{if(/INPUT|TEXTAREA|SELECT/.test(document
   if(e.key==='Escape'&&S.open){S.open=null;render()}
   if(e.key==='/'){e.preventDefault();$('#q').focus()}
   if(e.key==='n'){e.preventDefault();const n=$('#newtask');n&&n.focus()}});
-setInterval(refresh,1500);setInterval(loadWts,6000);setInterval(()=>{if(S.board)renderBoard()},60000);
-refresh(true).then(loadWts);
+let lastPoll=0;(async function loop(){if(Date.now()-lastPoll>=B.poll()){lastPoll=Date.now();await refresh()}setTimeout(loop,500)})();
+if(B.worktrees){loadWts();setInterval(loadWts,6000)}
+setInterval(()=>{if(S.board)renderBoard()},60000);
 </script></body></html>
 __UI__*/
+
+// GitHub backend for the Pages board. `tb pages` puts it, plus makeCore's source, into the page.
+/*__GH__<style>
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.35);display:none;align-items:center;justify-content:center;z-index:30;padding:16px}
+.modal.open{display:flex}
+.modal form{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px 22px;width:min(460px,100%);display:flex;flex-direction:column;gap:12px;box-shadow:0 20px 60px rgba(0,0,0,.25)}
+.modal h2{margin:0;font-size:16px}
+.modal label{display:flex;flex-direction:column;gap:4px;font-size:12.5px;color:var(--muted)}
+.modal label.chk{flex-direction:row;align-items:center;gap:8px}
+.modal input:not([type=checkbox]){background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:7px 9px;color:var(--ink)}
+.modal .btns{display:flex;justify-content:flex-end;gap:8px}
+.rochip{font-size:12px;color:var(--warn);margin-right:8px}
+</style>
+<div class="modal" id="tbset"><form>
+  <h2>Board settings</h2>
+  <label>Repository<input name="repo" placeholder="owner/name" required></label>
+  <label>Board branch<input name="branch" placeholder="taskboard"></label>
+  <label>GitHub token (needed to edit, or to read a private repo)<input name="token" type="password" autocomplete="off" placeholder="github_pat_…"></label>
+  <label class="chk"><input type="checkbox" name="remember"> Remember the token on this device</label>
+  <p class="hint">Use a fine-grained token (GitHub → Settings → Developer settings → Fine-grained tokens) with access to only this repository and the permission “Contents: Read and write”. It stays in this browser and is only sent to api.github.com. All GitHub Pages sites of the same account share browser storage, so don’t tick “remember” on a shared computer.</p>
+  <div class="btns"><button type="button" data-x="cancel">Cancel</button><button class="primary">Save</button></div>
+</form></div>
+<script>
+(function(){
+const CORE=(__CORE__)(n=>{const a=new Uint8Array(n);crypto.getRandomValues(a);return Array.from(a,b=>b.toString(16).padStart(2,'0')).join('')});
+const API=window.TB_API||'https://api.github.com', RAW=window.TB_RAW||'https://raw.githubusercontent.com';
+const store=k=>{try{const s=window[k];s.getItem('x');return s}catch(e){return null}};
+const LS=store('localStorage'), SS=store('sessionStorage');
+const get=(s,k)=>s?s.getItem(k):null;
+function guessRepo(){const m=/^([^.]+)\.github\.io$/i.exec(location.hostname);const seg=location.pathname.split('/').filter(Boolean)[0];return m&&seg&&seg!=='index.html'?m[1]+'/'+seg:''}
+const q=new URLSearchParams(location.search);
+const cfg={repo:q.get('repo')||get(LS,'tb.repo')||guessRepo(),branch:q.get('branch')||get(LS,'tb.branch')||'taskboard',token:get(SS,'tb.token')||get(LS,'tb.token')||''};
+let etag=null,lastHead=null,me=null;const cache=new Map();
+const brPath=()=>cfg.branch.split('/').map(encodeURIComponent).join('/');
+const R=()=>'/repos/'+cfg.repo;
+
+function explain(r,m){
+  if(r.status===401)return'GitHub rejected the token (401). Check it in Settings.';
+  if((r.status===403||r.status===429)&&r.headers.get('x-ratelimit-remaining')==='0')return'GitHub API rate limit reached. Add a token in Settings for a much higher limit.';
+  if(r.status===404)return'Not found: '+cfg.repo+' (branch "'+cfg.branch+'").'+(cfg.token?' Check the name and that the token can access this repo.':' If the repo is private, add a token in Settings.');
+  if(r.status===409)return'The repository '+cfg.repo+' is empty.';
+  return'GitHub API '+r.status+': '+(m||r.statusText);
+}
+async function gh(path,o={}){
+  const h={Accept:'application/vnd.github+json',...(o.headers||{})};
+  if(cfg.token)h.Authorization='Bearer '+cfg.token;
+  if(o.body)h['Content-Type']='application/json';
+  const r=await fetch(API+path,{method:o.method||'GET',headers:h,body:o.body?JSON.stringify(o.body):undefined,cache:'no-store'});
+  if(r.status===304||(o.allow||[]).includes(r.status))return r;
+  if(!r.ok){let m='';try{m=(await r.json()).message}catch(e){}throw new Error(explain(r,m))}
+  return r;
+}
+async function head(fresh){
+  if(!cfg.repo){openSettings();throw new Error('Choose a repository in Settings.')}
+  const r=await gh(R()+'/git/ref/heads/'+brPath(),{headers:!fresh&&etag&&lastHead?{'If-None-Match':etag}:{}});
+  if(r.status===304)return lastHead;
+  const j=await r.json();etag=r.headers.get('etag');lastHead=j.object.sha;return lastHead;
+}
+async function fileAt(sha,path){
+  if(cfg.token){const r=await gh(R()+'/contents/'+path+'?ref='+sha,{headers:{Accept:'application/vnd.github.raw+json'},allow:[404]});return r.status===404?null:r.text()}
+  const r=await fetch(RAW+'/'+cfg.repo+'/'+sha+'/'+path,{cache:'no-store'});
+  if(r.status===404)return null;
+  if(!r.ok)throw new Error('Could not load '+path+' ('+r.status+')');
+  return r.text();
+}
+async function legacyJson(sha){ // boards written before board.json existed
+  const c=await(await gh(R()+'/git/commits/'+sha)).json();
+  const t=await(await gh(R()+'/git/trees/'+c.tree.sha+'?recursive=1')).json();
+  const files=t.tree.filter(e=>e.type==='blob'&&(e.path==='config.json'||/^tasks\/[^/]+\.json$/.test(e.path)));
+  const texts=await Promise.all(files.map(e=>fileAt(sha,e.path)));
+  let config={};const tasks=[];
+  files.forEach((e,i)=>{const j=JSON.parse(texts[i]);if(e.path==='config.json')config=j;else tasks.push(j)});
+  return JSON.stringify({config,tasks});
+}
+async function load(sha){
+  if(!cache.has(sha)){let t=await fileAt(sha,'board.json');if(t===null)t=await legacyJson(sha);cache.set(sha,t)}
+  return CORE.fromBoardJson(cache.get(sha),sha); // fresh objects every time
+}
+async function mutate(fn){
+  if(!cfg.token){openSettings();throw new Error('Add a GitHub token in Settings to edit the board.')}
+  for(let i=0;i<8;i++){
+    const old=await head(true);
+    const st=await load(old);
+    const before=new Map(Array.from(st.tasks,([id,t])=>[id,t.raw]));
+    const res=fn(st);
+    const tree=[];const blob=(path,content)=>tree.push({path,mode:'100644',type:'blob',content});
+    for(const[id,t]of st.tasks){const s=CORE.ser(t.data);if(before.get(id)!==s)blob('tasks/'+id+'.json',s)}
+    for(const id of before.keys())if(!st.tasks.has(id))tree.push({path:'tasks/'+id+'.json',mode:'100644',type:'blob',sha:null});
+    blob('config.json',CORE.ser(st.config));blob('BOARD.md',CORE.renderBoardMd(st));blob('board.json',CORE.boardJson(st));
+    const c=await(await gh(R()+'/git/commits/'+old)).json();
+    const nt=await(await gh(R()+'/git/trees',{method:'POST',body:{base_tree:c.tree.sha,tree}})).json();
+    const nc=await(await gh(R()+'/git/commits',{method:'POST',body:{message:res.msg+' (web)',tree:nt.sha,parents:[old]}})).json();
+    // Not a force update: GitHub refuses it unless the branch still points at `old`, so concurrent writers retry.
+    const r=await gh(R()+'/git/refs/heads/'+brPath(),{method:'PATCH',body:{sha:nc.sha,force:false},allow:[409,422]});
+    if(r.ok){lastHead=nc.sha;etag=null;return res.out}
+    await new Promise(ok=>setTimeout(ok,300+Math.random()*700));
+  }
+  throw new Error('The board kept changing while saving. Please try again.');
+}
+async function whoami(){me=null;if(!cfg.token)return;try{me=(await(await gh('/user')).json()).login}catch(e){}}
+
+const A=CORE.apply;
+window.TB_BACKEND={
+  mode:'github',
+  poll:()=>cfg.token?5000:60000, // unauthenticated API calls are limited to 60 per hour
+  head:()=>head(false),
+  board:async()=>{const sha=lastHead||await head(false);const st=await load(sha);
+    return{commit:sha,prefix:st.config.prefix,branch:cfg.branch,repo:cfg.repo,remote:null,me:me||'web',readOnly:!cfg.token,tasks:Array.from(st.tasks.values(),t=>t.data)}},
+  op:b=>{const by=me||'web';return mutate(st=>{switch(b.op){
+    case'add':return A.add(st,b,by);
+    case'edit':return A.edit(st,b.id,b.fields||{},by);
+    case'move':return A.move(st,b.id,b.status,by);
+    case'log':return A.log(st,b.id,b.type,b.msg,by);
+    case'resolve':return A.resolve(st,b.id,b.k,b.msg,by);
+    case'steps':return A.addSteps(st,b.id,b.text,by);
+    case'tick':return A.tick(st,b.id,[b.k],!!b.done,by);
+    case'unstep':return A.removeStep(st,b.id,b.k,by);
+    case'rm':return A.rm(st,b.id,by);
+    default:CORE.fail('not available on the web board: '+b.op)}})},
+};
+
+// settings dialog + header controls
+const M=document.getElementById('tbset'),F=M.querySelector('form');
+function openSettings(){F.repo.value=cfg.repo;F.branch.value=cfg.branch;F.token.value=cfg.token;F.remember.checked=!!get(LS,'tb.token');M.classList.add('open');setTimeout(()=>F.repo.focus(),0)}
+M.addEventListener('click',e=>{if(e.target===M||e.target.dataset.x==='cancel')M.classList.remove('open')});
+F.addEventListener('submit',async e=>{e.preventDefault();
+  cfg.repo=F.repo.value.trim().replace(/^https?:\/\/github\.com\//,'').replace(/\.git$/,'').replace(/\/+$/,'');
+  cfg.branch=F.branch.value.trim()||'taskboard';cfg.token=F.token.value.trim();
+  try{LS&&LS.setItem('tb.repo',cfg.repo);LS&&LS.setItem('tb.branch',cfg.branch);
+    if(cfg.token&&F.remember.checked){LS&&LS.setItem('tb.token',cfg.token);SS&&SS.removeItem('tb.token')}
+    else{LS&&LS.removeItem('tb.token');cfg.token?SS&&SS.setItem('tb.token',cfg.token):SS&&SS.removeItem('tb.token')}}catch(e){}
+  etag=null;lastHead=null;cache.clear();M.classList.remove('open');
+  await whoami();drawExtra();window.tbRefresh&&window.tbRefresh(true)});
+function drawExtra(){
+  const x=document.getElementById('extra');
+  x.innerHTML=(cfg.token?'':'<span class="rochip" title="Add a token in Settings to edit">read-only</span>')+'<button id="tbsetbtn">Settings</button>';
+  document.getElementById('tbsetbtn').onclick=openSettings;
+}
+addEventListener('DOMContentLoaded',()=>{drawExtra();if(cfg.token)whoami()});
+})();
+</script>
+__GH__*/
