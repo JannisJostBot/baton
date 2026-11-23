@@ -1,0 +1,62 @@
+{
+  "id": "TB-4",
+  "uid": "3784dd611977",
+  "title": "GitHub Pages board (live view + editing via GitHub API)",
+  "status": "todo",
+  "priority": "high",
+  "labels": [],
+  "parent": null,
+  "description": "Static page on GitHub Pages that reads the taskboard branch through the GitHub API and, with a token, edits it with the same CAS semantics as the CLI. Share task logic between CLI and page so they cannot drift.",
+  "assignee": null,
+  "branch": null,
+  "worktree": null,
+  "summary": null,
+  "created": "2026-11-23T09:40:07.600Z",
+  "updated": "2026-11-23T09:40:07.602Z",
+  "steps": [
+    {
+      "k": "1da8",
+      "text": "Extract pure core (ops, merge, render) from tb.mjs",
+      "done": false
+    },
+    {
+      "k": "0ce0",
+      "text": "Add board.json to board tree for 1-request loading",
+      "done": false
+    },
+    {
+      "k": "951d",
+      "text": "Make UI backend-agnostic",
+      "done": false
+    },
+    {
+      "k": "d83c",
+      "text": "GitHub backend + settings (repo, branch, token)",
+      "done": false
+    },
+    {
+      "k": "201c",
+      "text": "tb pages command",
+      "done": false
+    },
+    {
+      "k": "fa75",
+      "text": "Test against mock GitHub API",
+      "done": false
+    },
+    {
+      "k": "da91",
+      "text": "README + enable Pages",
+      "done": false
+    }
+  ],
+  "log": [
+    {
+      "k": "3138",
+      "t": "2026-11-23T09:40:07.602Z",
+      "by": "main",
+      "type": "created",
+      "msg": "created"
+    }
+  ]
+}
