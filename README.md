@@ -1,4 +1,6 @@
-# tb — a git-native task board for AI agents and humans
+# baton — hand work from one AI session to the next
+
+A git-native task board for AI coding agents and humans. The command is `tb`.
 
 One file (`tb.mjs`), no dependencies, no server, no database. You need Node 18+ and git.
 
@@ -21,7 +23,7 @@ node tb.mjs ui            # opens http://127.0.0.1:4477
 **Option B: install it globally as `tb`.**
 
 ```bash
-npm install -g github:JannisJostBot/taskboard
+npm install -g github:JannisJostBot/baton
 cd /path/to/your/repo && tb init
 ```
 
@@ -69,7 +71,7 @@ Task IDs can be written as `TB-4` or just `4`. Who is acting defaults to the cur
 
 The web board also shows how many **uncommitted files** sit in the worktree where each in-progress task is being worked on. That's the "how far along is this without a PR" signal.
 
-## Developing tb itself
+## Developing baton itself
 
 This repo uses its own board: run `node tb.mjs context` or `node tb.mjs ui` here. The UI is the HTML at the bottom of `tb.mjs`, inside a comment, so the tool stays a single file.
 

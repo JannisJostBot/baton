@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// tb.mjs — a git-native task board for AI agents and humans.
+// tb.mjs (baton) — a git-native task board for AI agents and humans.
+// https://github.com/JannisJostBot/baton
 //
 // * Zero dependencies: needs only Node 18+ and git.
 // * Board data lives on its own git branch (default: `taskboard`), written with

@@ -1,6 +1,7 @@
 {
-  "name": "taskboard",
+  "name": "baton",
   "version": "0.1.0",
+  "repository": "github:JannisJostBot/baton",
   "description": "A git-native task board for AI coding agents and humans. One file, no dependencies, no server.",
   "type": "module",
   "bin": { "tb": "tb.mjs" },
