@@ -1,0 +1,11 @@
+{
+  "name": "taskboard",
+  "version": "0.1.0",
+  "description": "A git-native task board for AI coding agents and humans. One file, no dependencies, no server.",
+  "type": "module",
+  "bin": { "tb": "tb.mjs" },
+  "files": ["tb.mjs", "README.md", "LICENSE"],
+  "engines": { "node": ">=18" },
+  "keywords": ["ai", "agents", "claude", "kanban", "git", "task-tracker", "issue-tracker"],
+  "license": "MIT"
+}
