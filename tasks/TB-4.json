@@ -2,7 +2,7 @@
   "id": "TB-4",
   "uid": "3784dd611977",
   "title": "GitHub Pages board (live view + editing via GitHub API)",
-  "status": "in_progress",
+  "status": "review",
   "priority": "high",
   "labels": [],
   "parent": null,
@@ -12,7 +12,7 @@
   "worktree": "/home/claude/baton",
   "summary": null,
   "created": "2026-11-23T09:40:07.600Z",
-  "updated": "2026-11-23T09:57:36.530Z",
+  "updated": "2026-11-23T09:57:36.633Z",
   "steps": [
     {
       "k": "1da8",
@@ -92,6 +92,13 @@
       "by": "claude-cloud",
       "type": "issue",
       "msg": "Needs Jannis: enable GitHub Pages (main, /docs) and test editing with a real fine-grained token."
+    },
+    {
+      "k": "86f3",
+      "t": "2026-11-23T09:57:36.633Z",
+      "by": "claude-cloud",
+      "type": "status",
+      "msg": "in_progress → review"
     }
   ]
 }
