@@ -2,17 +2,17 @@
   "id": "TB-4",
   "uid": "3784dd611977",
   "title": "GitHub Pages board (live view + editing via GitHub API)",
-  "status": "todo",
+  "status": "in_progress",
   "priority": "high",
   "labels": [],
   "parent": null,
   "description": "Static page on GitHub Pages that reads the taskboard branch through the GitHub API and, with a token, edits it with the same CAS semantics as the CLI. Share task logic between CLI and page so they cannot drift.",
-  "assignee": null,
-  "branch": null,
-  "worktree": null,
+  "assignee": "claude-cloud",
+  "branch": "main",
+  "worktree": "/home/claude/baton",
   "summary": null,
   "created": "2026-11-23T09:40:07.600Z",
-  "updated": "2026-11-23T09:40:07.602Z",
+  "updated": "2026-11-23T09:40:07.697Z",
   "steps": [
     {
       "k": "1da8",
@@ -57,6 +57,13 @@
       "by": "main",
       "type": "created",
       "msg": "created"
+    },
+    {
+      "k": "3acb",
+      "t": "2026-11-23T09:40:07.697Z",
+      "by": "claude-cloud",
+      "type": "status",
+      "msg": "started (todo → in_progress) on main"
     }
   ]
 }
