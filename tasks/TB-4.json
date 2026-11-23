@@ -12,7 +12,7 @@
   "worktree": "/home/claude/baton",
   "summary": null,
   "created": "2026-11-23T09:40:07.600Z",
-  "updated": "2026-11-23T09:57:36.428Z",
+  "updated": "2026-11-23T09:57:36.530Z",
   "steps": [
     {
       "k": "1da8",
@@ -85,6 +85,13 @@
       "by": "claude-cloud",
       "type": "progress",
       "msg": "Pushed to main (9a15ba8): tb pages, docs/index.html, tests, README section. Verified read-only against real api.github.com for this repo, desktop + 390px mobile. Remaining: Jannis must enable Pages (Settings → Pages → main /docs) and try editing with a fine-grained token; real-API editing is only tested against the mock."
+    },
+    {
+      "k": "ed70",
+      "t": "2026-11-23T09:57:36.530Z",
+      "by": "claude-cloud",
+      "type": "issue",
+      "msg": "Needs Jannis: enable GitHub Pages (main, /docs) and test editing with a real fine-grained token."
     }
   ]
 }
