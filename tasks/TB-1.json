@@ -1,0 +1,26 @@
+{
+  "id": "TB-1",
+  "uid": "9c3be85759f9",
+  "title": "Test sync from Claude Code web sessions",
+  "status": "todo",
+  "priority": "high",
+  "labels": [],
+  "parent": null,
+  "description": "Unverified: can cloud sessions push the taskboard branch, or only their session branch? If restricted, document TB_BRANCH workaround.",
+  "assignee": null,
+  "branch": null,
+  "worktree": null,
+  "summary": null,
+  "created": "2026-11-23T08:25:48.989Z",
+  "updated": "2026-11-23T08:25:48.994Z",
+  "steps": [],
+  "log": [
+    {
+      "k": "e6e2",
+      "t": "2026-11-23T08:25:48.994Z",
+      "by": "main",
+      "type": "created",
+      "msg": "created"
+    }
+  ]
+}
