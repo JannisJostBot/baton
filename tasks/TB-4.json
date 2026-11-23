@@ -12,7 +12,7 @@
   "worktree": "/home/claude/baton",
   "summary": null,
   "created": "2026-11-23T09:40:07.600Z",
-  "updated": "2026-11-23T09:41:40.694Z",
+  "updated": "2026-11-23T09:41:40.824Z",
   "steps": [
     {
       "k": "1da8",
@@ -64,6 +64,13 @@
       "by": "claude-cloud",
       "type": "status",
       "msg": "started (todo → in_progress) on main"
+    },
+    {
+      "k": "bc91",
+      "t": "2026-11-23T09:41:40.824Z",
+      "by": "claude-cloud",
+      "type": "progress",
+      "msg": "Pure core extracted into makeCore(rand) in tb.mjs (ops = C.apply.*, merge, renderBoardMd, boardJson/fromBoardJson). Board tree now also has board.json (all tasks, 1 file). Added test/cli.test.sh (all pass). Next: backend abstraction in the UI block."
     }
   ]
 }
