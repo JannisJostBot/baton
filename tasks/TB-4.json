@@ -12,7 +12,7 @@
   "worktree": "/home/claude/baton",
   "summary": null,
   "created": "2026-11-23T09:40:07.600Z",
-  "updated": "2026-11-23T09:54:16.226Z",
+  "updated": "2026-11-23T09:57:36.428Z",
   "steps": [
     {
       "k": "1da8",
@@ -78,6 +78,13 @@
       "by": "claude-cloud",
       "type": "progress",
       "msg": "Pages backend done: embedded block __GH__ in tb.mjs (GitHub API reads via board.json/raw, writes via git data API with non-force ref PATCH = CAS, 8 retries), settings dialog, read-only mode, tb pages command writes docs/index.html + .nojekyll. UI now uses a backend object (local server or window.TB_BACKEND). test/pages.test.py + test/mock-github.mjs: all pass incl. conflict retry and legacy boards. Next: test against real api.github.com, README, push."
+    },
+    {
+      "k": "358b",
+      "t": "2026-11-23T09:57:36.428Z",
+      "by": "claude-cloud",
+      "type": "progress",
+      "msg": "Pushed to main (9a15ba8): tb pages, docs/index.html, tests, README section. Verified read-only against real api.github.com for this repo, desktop + 390px mobile. Remaining: Jannis must enable Pages (Settings → Pages → main /docs) and try editing with a fine-grained token; real-API editing is only tested against the mock."
     }
   ]
 }
