@@ -12,17 +12,17 @@
   "worktree": "/home/claude/baton",
   "summary": null,
   "created": "2026-11-23T09:40:07.600Z",
-  "updated": "2026-11-23T09:40:07.697Z",
+  "updated": "2026-11-23T09:41:40.694Z",
   "steps": [
     {
       "k": "1da8",
       "text": "Extract pure core (ops, merge, render) from tb.mjs",
-      "done": false
+      "done": true
     },
     {
       "k": "0ce0",
       "text": "Add board.json to board tree for 1-request loading",
-      "done": false
+      "done": true
     },
     {
       "k": "951d",
