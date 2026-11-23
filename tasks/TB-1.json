@@ -12,7 +12,7 @@
   "worktree": "/home/claude/baton",
   "summary": null,
   "created": "2026-11-23T08:25:48.989Z",
-  "updated": "2026-11-23T09:38:00.620Z",
+  "updated": "2026-11-23T09:38:00.739Z",
   "steps": [],
   "log": [
     {
@@ -28,6 +28,13 @@
       "by": "claude-cloud",
       "type": "status",
       "msg": "started (todo → in_progress) on main"
+    },
+    {
+      "k": "a378",
+      "t": "2026-11-23T09:38:00.739Z",
+      "by": "claude-cloud",
+      "type": "progress",
+      "msg": "Checked from a Claude Code cloud session: pushing the taskboard branch via 'tb sync' works (git proxy allows non-session branches for this repo). Not yet checked: a session started from claude.ai/code with a restricted branch policy."
     }
   ]
 }
